@@ -113,7 +113,14 @@ touch $LOG_FILE
 
 while true; do
     clear
-    echo "=== VPS库存监控系统 ==="
+    echo -e "${RED} ========================================= ${RESET}"
+    echo -e "${RED} 作者: jinqian ${RESET}"
+    echo -e "${RED} 网站：https://jinqians.com ${RESET}"
+    echo -e "${RED} 描述: 这个脚本用于安装、卸载、查看和更新 Snell 代理 ${RESET}"
+    echo -e "${RED} ========================================= ${RESET}"
+
+    echo -e "${CYAN} ============== VPS库存监控系统  ============== ${RESET}"
+    
     echo "1. 添加监控网址"
     echo "2. 删除监控网址"
     echo "3. 显示所有监控网址"
