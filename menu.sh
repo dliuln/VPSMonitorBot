@@ -7,6 +7,12 @@
 # 描述: 这个脚本用于安装、卸载、查看和更新 Snell 代理
 # =========================================
 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RESET='\033[0m'
+
 URLS_FILE="urls.txt"
 LOG_FILE="monitor.log"
 CONFIG_FILE="config.json"
