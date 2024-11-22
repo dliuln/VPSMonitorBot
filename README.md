@@ -43,5 +43,5 @@ git clone https://github.com/jinqians/VPSMonitorBot.git && cd VPSMonitorBot && c
 ====================
 监控状态: 运行中 (PID: 23395)
 ====================
-请选择操作 (1-9): 
+请选择操作 (0-8): 
 ```
