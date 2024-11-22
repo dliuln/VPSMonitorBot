@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# =========================================
+# 作者: jinqian
+# 日期: 2024年11月
+# 网站：jinqians.com
+# 描述: 这个脚本用于安装、卸载、查看和更新 Snell 代理
+# =========================================
+
 URLS_FILE="urls.txt"
 LOG_FILE="monitor.log"
 CONFIG_FILE="config.json"
