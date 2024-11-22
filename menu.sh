@@ -4,7 +4,7 @@
 # 作者: jinqian
 # 日期: 2024年11月
 # 网站：jinqians.com
-# 描述: 这个脚本用于安装、卸载、查看和更新 Snell 代理
+# 描述: 这个脚本用于监控VPS商家库存
 # =========================================
 
 RED='\033[0;31m'
@@ -122,7 +122,7 @@ while true; do
     echo -e "${RED} ========================================= ${RESET}"
     echo -e "${RED} 作者: jinqian ${RESET}"
     echo -e "${RED} 网站：https://jinqians.com ${RESET}"
-    echo -e "${RED} 描述: 这个脚本用于安装、卸载、查看和更新 Snell 代理 ${RESET}"
+    echo -e "${RED} 描述: 这个脚本用于监控VPS商家库存 ${RESET}"
     echo -e "${RED} ========================================= ${RESET}"
 
     echo -e "${CYAN} ============== VPS库存监控系统  ============== ${RESET}"
