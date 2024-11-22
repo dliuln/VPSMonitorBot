@@ -145,7 +145,7 @@ while true; do
     fi
     echo "===================="
     
-    read -p "请选择操作 (1-9): " choice
+    read -p "请选择操作 (0-8): " choice
     
     case $choice in
         1)
