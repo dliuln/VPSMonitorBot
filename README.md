@@ -14,5 +14,8 @@ VPSMonitorBot 是一个基于 Telegram 的网站库存监控工具，旨在帮�
 本项目使用 Python 编写，结合 `cloudscraper` 绕过反爬虫机制，使用 `requests` 库进行网站商品库存检测，并通过 `python-telegram-bot` 库与 Telegram 进行消息通知。项目使用虚拟环境管理 Python 依赖，确保环境隔离与兼容性。
 
 ## 使用
-git clone https://github.com/yourusername/VPSMonitorBot.git
-cd VPSMonitorBot
+```shell
+apt install git -y
+git clone https://github.com/jinqians/VPSMonitorBot.git && cd VPSMonitorBot && chmod +x menu.sh
+./menu.sh
+```
