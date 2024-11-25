@@ -2,7 +2,7 @@
 VPSMonitorBot 是一个基于 Telegram 的网站库存监控工具，旨在帮助用户实时监控指定网站的商品供货情况。通过此工具，您可以监控多个VPS网站或商品页面的库存状态，当某个商品上架，系统会自动通过 Telegram 发送通知。特别适合需要监控VPS是否有货的用户，确保不会错过重要的购买机会。
 
 ## 演示机器人
-[@JQ_VPSMonitorBot](t.me/JQ_VPSMonitorBot)
+[@JQ_VPSMonitorBot](https://t.me/JQ_VPSMonitorBot)
 
 ## 核心功能
 
