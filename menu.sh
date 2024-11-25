@@ -4,227 +4,395 @@
 # 作者: jinqian
 # 日期: 2024年11月
 # 网站：jinqians.com
+# 网站：V2.0
 # 描述: 这个脚本用于监控VPS商家库存
 # =========================================
 
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-URLS_FILE="urls.txt"
-LOG_FILE="monitor.log"
+# 配置文件
 CONFIG_FILE="config.json"
-VENV_DIR="venv"
-PYTHON_CMD="python3"
-PID_FILE="monitor.pid"
+URLS_FILE="urls.txt"
+MONITOR_LOG="monitor.log"
+INIT_MARK=".initialized"
+
+# 检查监控状态
+check_monitor_status() {
+    if pgrep -f "python3 monitor.py" > /dev/null; then
+        local pid=$(pgrep -f "python3 monitor.py")
+        local uptime=$(ps -o etime= -p "$pid")
+        echo -e "${GREEN}运行中 (PID: $pid, 运行时间: $uptime)${NC}"
+        return 0
+    else
+        echo -e "${RED}未运行${NC}"
+        return 1
+    fi
+}
+
+# 显示监控详情
+show_monitor_details() {
+    if check_monitor_status > /dev/null; then
+        local pid=$(pgrep -f "python3 monitor.py")
+        echo -e "\n${BLUE}=== 监控详情 ===${NC}"
+        echo -e "${YELLOW}进程ID: ${NC}$pid"
+        echo -e "${YELLOW}运行时间: ${NC}$(ps -o etime= -p "$pid")"
+        echo -e "${YELLOW}内存使用: ${NC}$(ps -o rss= -p "$pid" | awk '{print $1/1024 "MB"}')"
+        echo -e "${YELLOW}CPU使用率: ${NC}$(ps -o %cpu= -p "$pid")%"
+        
+        if [ -f "$MONITOR_LOG" ]; then
+            echo -e "\n${BLUE}=== 最近日志 ===${NC}"
+            tail -n 5 "$MONITOR_LOG"
+        fi
+        
+        if [ -f "$URLS_FILE" ]; then
+            local url_count=$(wc -l < "$URLS_FILE")
+            echo -e "\n${BLUE}=== 监控统计 ===${NC}"
+            echo -e "${YELLOW}监控商品数: ${NC}$url_count"
+        fi
+    else
+        echo -e "${RED}监控程序未运行${NC}"
+    fi
+}
+
+# 启动监控
+start_monitor() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: 未找到配置文件，请先配置Telegram信息${NC}"
+        return
+    fi
+
+    if [ ! -s "$URLS_FILE" ]; then
+        echo -e "${RED}错误: 未找到监控商品，请先添加监控商品${NC}"
+        return
+    fi
+
+    if pgrep -f "python3 monitor.py" > /dev/null; then
+        echo -e "${YELLOW}监控程序已在运行中${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}正在启动监控程序...${NC}"
+    source venv/bin/activate
+    nohup python3 monitor.py >> "$MONITOR_LOG" 2>&1 &
+    sleep 3
+    
+    if pgrep -f "python3 monitor.py" > /dev/null; then
+        echo -e "${GREEN}监控程序已成功启动${NC}"
+    else
+        echo -e "${RED}监控程序启动失败${NC}"
+        echo -e "${YELLOW}查看错误日志...${NC}"
+        tail -n 5 "$MONITOR_LOG"
+    fi
+}
+
+# 停止监控
+stop_monitor() {
+    local pid=$(pgrep -f "python3 monitor.py")
+    if [ -n "$pid" ]; then
+        echo -e "${YELLOW}正在停止监控程序 (PID: $pid)...${NC}"
+        kill $pid
+        sleep 2
+        if ! pgrep -f "python3 monitor.py" > /dev/null; then
+            echo -e "${GREEN}监控程序已停止${NC}"
+        else
+            echo -e "${RED}监控程序未能正常停止，尝试强制终止...${NC}"
+            kill -9 $pid
+            echo -e "${GREEN}监控程序已强制终止${NC}"
+        fi
+    else
+        echo -e "${YELLOW}没有运行中的监控程序${NC}"
+    fi
+}
+
+# 添加URL
+add_url() {
+    echo -e "\n${YELLOW}请输入产品名称: ${NC}"
+    read -r product_name
+    
+    echo -e "${YELLOW}请输入产品URL: ${NC}"
+    read -r product_url
+    
+    if [[ -z "$product_name" || -z "$product_url" ]]; then
+        echo -e "${RED}产品名称和URL不能为空${NC}"
+        return
+    fi
+    
+    if ! [[ "$product_url" =~ ^https?:// ]]; then
+        echo -e "${RED}无效的URL格式${NC}"
+        return
+    fi
+    
+    echo "$product_name|$product_url" >> "$URLS_FILE"
+    echo -e "${GREEN}添加成功${NC}"
+}
+
+# 删除URL
+delete_url() {
+    if [ ! -s "$URLS_FILE" ]; then
+        echo -e "${YELLOW}监控列表为空${NC}"
+        return
+    fi
+
+    echo -e "\n${YELLOW}当前监控列表：${NC}"
+    nl -w1 -s'. ' "$URLS_FILE"
+    
+    echo -e "\n${YELLOW}请输入要删除的序号：${NC}"
+    read -r number
+    
+    if [[ ! "$number" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}无效的序号${NC}"
+        return 1
+    fi
+    
+    line=$(sed -n "${number}p" "$URLS_FILE")
+    if [ -z "$line" ]; then
+        echo -e "${RED}序号不存在${NC}"
+        return 1
+    fi
+    
+    name="${line%|*}"
+    url="${line#*|}"
+    
+    # 删除指定行
+    sed -i "${number}d" "$URLS_FILE"
+    echo -e "${GREEN}已删除监控：${NC}"
+    echo -e "${BLUE}产品：${NC}$name"
+    echo -e "${BLUE}网址：${NC}$url"
+}
+
+# 显示所有URL
+show_urls() {
+    if [ ! -s "$URLS_FILE" ]; then
+        echo -e "${YELLOW}监控列表为空${NC}"
+        return
+    fi
+
+    echo -e "\n${YELLOW}当前监控列表：${NC}"
+    while IFS='|' read -r name url; do
+        echo -e "${BLUE}产品：${NC}$name"
+        echo -e "${BLUE}网址：${NC}$url"
+        echo "----------------------------------------"
+    done < "$URLS_FILE"
+}
+
+# 配置Telegram
+configure_telegram() {
+    echo -e "\n${YELLOW}请输入Telegram Bot Token: ${NC}"
+    read -r bot_token
+    
+    echo -e "${YELLOW}请输入Telegram Chat ID: ${NC}"
+    read -r chat_id
+    
+    echo -e "${YELLOW}请输入检查间隔(秒，默认300): ${NC}"
+    read -r interval
+    interval=${interval:-300}
+    
+    cat > "$CONFIG_FILE" << EOF
+{
+    "bot_token": "$bot_token",
+    "chat_id": "$chat_id",
+    "check_interval": $interval
+}
+EOF
+    echo -e "${GREEN}配置已保存${NC}"
+}
+
+# 查看日志
+view_log() {
+    if [ -f "$MONITOR_LOG" ]; then
+        echo -e "\n${YELLOW}最近的监控日志:${NC}"
+        echo -e "${BLUE}====================${NC}"
+        tail -n 50 "$MONITOR_LOG"
+        echo -e "${BLUE}====================${NC}"
+        echo -e "${YELLOW}提示: 按 Ctrl+C 退出日志查看${NC}"
+    else
+        echo -e "${YELLOW}日志文件不存在${NC}"
+    fi
+}
+
+# 检查Python环境
+check_python() {
+    if ! command -v python3 &> /dev/null; then
+        echo -e "${YELLOW}正在安装Python3...${NC}"
+        if [ -f "/etc/debian_version" ]; then
+            sudo apt-get update && sudo apt-get install -y python3 python3-venv
+        elif [ -f "/etc/redhat-release" ]; then
+            sudo yum install -y python3 python3-venv
+        else
+            echo -e "${RED}错误: 无法安装Python3，请手动安装${NC}"
+            exit 1
+        fi
+    fi
+}
 
 # 检查并创建虚拟环境
-setup_venv() {
-    echo "检查虚拟环境..."
-    
-    # 检查python3-venv是否安装
-    if ! dpkg -l | grep -q python3-venv; then
-        echo "安装 python3-venv..."
-        sudo apt-get update
-        sudo apt-get install -y python3-venv python3-pip
-    fi
-    
-    # 创建虚拟环境（如果不存在）
-    if [ ! -d "$VENV_DIR" ]; then
-        echo "创建虚拟环境..."
-        $PYTHON_CMD -m venv $VENV_DIR
-    fi
-    
-    # 激活虚拟环境
-    source $VENV_DIR/bin/activate
-    
-    # 升级pip
-    echo "升级pip..."
-    pip install --upgrade pip
-    
-    # 安装依赖
-    echo "安装Python依赖..."
-    pip install requests "python-telegram-bot>=20.0" asyncio
-    
-    if ! pip show cloudscraper > /dev/null 2>&1; then
-        echo "安装 cloudscraper..."
-        pip install cloudscraper
-    else
-        echo "cloudscraper 已安装!"
-    fi
-    # 退出虚拟环境
-    deactivate
-    
-    echo "虚拟环境设置完成!"
-}
-
-# 检查监控程序状态
-check_monitor_status() {
-    if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE")
-        if ps -p "$pid" > /dev/null 2>&1; then
-            return 0  # 正在运行
+check_venv() {
+    if [ ! -d "venv" ]; then
+        echo -e "${YELLOW}正在创建Python虚拟环境...${NC}"
+        python3 -m venv venv
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}虚拟环境创建成功${NC}"
         else
-            rm -f "$PID_FILE"  # 删除过期的PID文件
+            echo -e "${RED}虚拟环境创建失败${NC}"
+            exit 1
         fi
     fi
-    return 1  # 没有运行
 }
 
-# 启动监控程序
-start_monitor() {
-    if check_monitor_status; then
-        echo "监控程序已经在运行中!"
-        return
-    fi
-    
-    # 检查和设置虚拟环境
-    setup_venv
-    
-    # 检查配置文件
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "请先配置Telegram信息!"
-        return
-    fi
-    
-    echo "启动监控程序..."
-    $VENV_DIR/bin/python monitor.py &
-    echo $! > "$PID_FILE"
-    echo "监控程序已在后台启动! (PID: $(cat $PID_FILE))"
-}
-
-# 停止监控程序
-stop_monitor() {
-    if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE")
-        if ps -p "$pid" > /dev/null 2>&1; then
-            echo "正在停止监控程序..."
-            kill "$pid"
-            rm -f "$PID_FILE"
-            echo "监控程序已停止"
-        else
-            echo "监控程序未在运行"
-            rm -f "$PID_FILE"
-        fi
+# 激活虚拟环境
+activate_venv() {
+    if [ -f "venv/bin/activate" ]; then
+        source venv/bin/activate
     else
-        echo "监控程序未在运行"
+        echo -e "${RED}错误: 虚拟环境不存在${NC}"
+        exit 1
     fi
 }
 
-# 确保文件存在
-touch $URLS_FILE
-touch $LOG_FILE
+# 安装依赖
+install_requirements() {
+    echo -e "${YELLOW}正在检查并安装依赖...${NC}"
+    
+    if ! command -v pip3 &> /dev/null; then
+        echo -e "${YELLOW}正在安装pip...${NC}"
+        if [ -f "/etc/debian_version" ]; then
+            sudo apt-get update && sudo apt-get install -y python3-pip
+        elif [ -f "/etc/redhat-release" ]; then
+            sudo yum install -y python3-pip
+        else
+            echo -e "${RED}错误: 无法安装pip，请手动安装${NC}"
+            exit 1
+        fi
+    fi
 
-while true; do
+    if [ -f "venv/bin/pip" ]; then
+        venv/bin/pip install -r requirements.txt --upgrade
+    else
+        pip3 install -r requirements.txt --upgrade
+    fi
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}依赖安装完成${NC}"
+    else
+        echo -e "${RED}依赖安装失败${NC}"
+        exit 1
+    fi
+}
+
+# 初始化环境
+initialize() {
+    # 检查是否已经初始化
+    if [ -f "$INIT_MARK" ]; then
+        # 只激活虚拟环境
+        if [ -f "venv/bin/activate" ]; then
+            source venv/bin/activate
+            return
+        fi
+    fi
+
+    # 首次运行，执行完整初始化
+    echo -e "${YELLOW}首次运行，正在初始化环境...${NC}"
+    check_python
+    check_venv
+    activate_venv
+    install_requirements
+    
+    # 首次运行配置Telegram
+    echo -e "\n${YELLOW}首次运行需要配置Telegram信息${NC}"
+    configure_telegram
+    
+    # 提示添加监控商品
+    echo -e "\n${YELLOW}是否现在添加监控商品? [Y/n] ${NC}"
+    read -r choice
+    if [[ ! "$choice" =~ ^[Nn]$ ]]; then
+        add_url
+    fi
+    
+    # 自动启动监控
+    if [ -f "$CONFIG_FILE" ] && [ -s "$URLS_FILE" ]; then
+        echo -e "\n${YELLOW}正在自动启动监控...${NC}"
+        start_monitor
+    else
+        echo -e "\n${RED}配置不完整，无法自动启动监控${NC}"
+        echo -e "${YELLOW}请在主菜单中完成配置后手动启动${NC}"
+    fi
+    
+    # 创建初始化标记文件
+    touch "$INIT_MARK"
+    echo -e "${GREEN}环境初始化完成${NC}"
+    
+    # 等待用户确认
+    echo -e "\n${YELLOW}按回车键继续...${NC}"
+    read
+}
+
+# 显示菜单
+show_menu() {
     clear
-    echo -e "${RED} ========================================= ${RESET}"
-    echo -e "${RED} 作者: jinqian ${RESET}"
-    echo -e "${RED} 网站：https://jinqians.com ${RESET}"
-    echo -e "${RED} 描述: 这个脚本用于监控VPS商家库存 ${RESET}"
-    echo -e "${RED} ========================================= ${RESET}"
-
-    echo -e "${CYAN} ============== VPS库存监控系统  ============== ${RESET}"
-    
-    echo "1. 添加监控网址"
-    echo "2. 删除监控网址"
-    echo "3. 显示所有监控网址"
+    echo "========================================="
+    echo " 作者: jinqian"
+    echo " 网站：https://jinqians.com"
+    echo " 描述: 这个脚本用于监控VPS商家库存"
+    echo "========================================="
+    # 显示监控状态和详情
+    echo -n "监控状态: "
+    check_monitor_status
+    if check_monitor_status > /dev/null; then
+        local pid=$(pgrep -f "python3 monitor.py")
+        echo -e "${BLUE}进程信息: ${NC}PID=$pid, 内存占用=$(ps -o rss= -p "$pid" | awk '{printf "%.1fMB", $1/1024}')"
+        if [ -f "$URLS_FILE" ]; then
+            local url_count=$(wc -l < "$URLS_FILE")
+            echo -e "${BLUE}监控商品数: ${NC}$url_count"
+        fi
+    fi
+    echo "========================================="
+    echo "============== VPS库存监控系统 =============="
+    echo "1. 添加监控商品"
+    echo "2. 删除监控商品"
+    echo "3. 显示所有监控商品"
     echo "4. 配置Telegram信息"
     echo "5. 启动监控"
     echo "6. 停止监控"
-    echo "7. 查看监控状态"
-    echo "8. 查看监控日志"
+    echo "7. 查看监控日志"
     echo "0. 退出"
     echo "===================="
+}
+
+# 主循环
+main() {
+    initialize
     
-    if check_monitor_status; then
-        echo "监控状态: 运行中 (PID: $(cat $PID_FILE))"
-    else
-        echo "监控状态: 已停止"
-    fi
-    echo "===================="
-    
-    read -p "请选择操作 (0-8): " choice
-    
-    case $choice in
-        1)
-            read -p "请输入要监控的网址: " url
-            echo "$url" >> $URLS_FILE
-            echo "添加成功!"
-            read -p "按Enter继续..."
-            ;;
-        2)
-            if [ ! -s $URLS_FILE ]; then
-                echo "目前没有监控的网址!"
-            else
-                echo "当前监控的网址:"
-                nl $URLS_FILE
-                read -p "请输入要删除的行号: " line_num
-                sed -i "${line_num}d" $URLS_FILE
-                echo "删除成功!"
-            fi
-            read -p "按Enter继续..."
-            ;;
-        3)
-            if [ ! -s $URLS_FILE ]; then
-                echo "目前没有监控的网址!"
-            else
-                echo "当前监控的网址:"
-                nl $URLS_FILE
-            fi
-            read -p "按Enter继续..."
-            ;;
-        4)
-            read -p "请输入Telegram Bot Token: " bot_token
-            read -p "请输入Telegram Chat ID: " chat_id
-            read -p "请输入检查间隔时间(秒)[默认300]: " check_interval
-            check_interval=${check_interval:-300}
-            
-            echo "{
-                \"bot_token\": \"$bot_token\",
-                \"chat_id\": \"$chat_id\",
-                \"check_interval\": $check_interval
-            }" > $CONFIG_FILE
-            echo "Telegram配置已保存!"
-            read -p "按Enter继续..."
-            ;;
-        5)
-            start_monitor
-            read -p "按Enter继续..."
-            ;;
-        6)
-            stop_monitor
-            read -p "按Enter继续..."
-            ;;
-        7)
-            if check_monitor_status; then
-                echo "监控程序正在运行 (PID: $(cat $PID_FILE))"
-                echo "最近的日志记录:"
-                tail -n 5 "$LOG_FILE"
-            else
-                echo "监控程序未在运行"
-            fi
-            read -p "按Enter继续..."
-            ;;
-        8)
-            echo "最近的日志记录:"
-            tail -n 20 "$LOG_FILE"
-            read -p "按Enter继续..."
-            ;;
-        0)
-            read -p "是否要停止监控程序后退出？(y/n): " confirm
-            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                stop_monitor
-            else
-                echo "监控程序将在后台继续运行"
-            fi
-            echo "感谢使用，再见!"
-            exit 0
-            ;;
-        *)
-            echo "无效选择，请重试!"
-            read -p "按Enter继续..."
-            ;;
-    esac
-done
+    while true; do
+        show_menu
+        echo -e "\n${YELLOW}请选择操作 (0-7): ${NC}"
+        read -r choice
+        
+        case $choice in
+            1) add_url ;;
+            2) delete_url ;;
+            3) show_urls ;;
+            4) configure_telegram ;;
+            5) start_monitor ;;
+            6) stop_monitor ;;
+            7) view_log ;;
+            0) 
+                echo -e "${GREEN}退出程序，监控进程继续在后台运行...${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}无效的选择${NC}"
+                ;;
+        esac
+        
+        echo -e "\n${YELLOW}按回车键继续...${NC}"
+        read
+    done
+}
+
+# 运行主程序
+main
