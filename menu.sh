@@ -17,7 +17,7 @@ NC='\033[0m'
 
 # 配置文件
 CONFIG_FILE="config.json"
-URLS_FILE="urls.txt"
+URLS_FILE="urls.json"
 MONITOR_LOG="monitor.log"
 INIT_MARK=".initialized"
 
@@ -50,7 +50,7 @@ show_monitor_details() {
         fi
         
         if [ -f "$URLS_FILE" ]; then
-            local url_count=$(wc -l < "$URLS_FILE")
+            local url_count=$(jq 'length' "$URLS_FILE")
             echo -e "\n${BLUE}=== 监控统计 ===${NC}"
             echo -e "${YELLOW}监控商品数: ${NC}$url_count"
         fi
@@ -114,6 +114,9 @@ add_url() {
     echo -e "\n${YELLOW}请输入产品名称: ${NC}"
     read -r product_name
     
+    echo -e "${YELLOW}请输入产品配置（可选，直接回车跳过）: ${NC}"
+    read -r product_config
+    
     echo -e "${YELLOW}请输入产品URL: ${NC}"
     read -r product_url
     
@@ -126,8 +129,25 @@ add_url() {
         echo -e "${RED}无效的URL格式${NC}"
         return
     fi
+
+    # 如果文件不存在或为空，创建一个空的JSON对象
+    if [ ! -f "$URLS_FILE" ] || [ ! -s "$URLS_FILE" ]; then
+        echo '{}' > "$URLS_FILE"
+    fi
+
+    # 生成唯一ID（使用时间戳）
+    id=$(date +%s)
     
-    echo "$product_name|$product_url" >> "$URLS_FILE"
+    # 构建JSON数据
+    json_data="{\"$id\": {\"名称\": \"$product_name\", \"URL\": \"$product_url\""
+    if [ ! -z "$product_config" ]; then
+        json_data="$json_data, \"配置\": \"$product_config\""
+    fi
+    json_data="$json_data}}"
+
+    # 使用jq合并数据
+    jq -r ". * $json_data" "$URLS_FILE" > "$URLS_FILE.tmp" && mv "$URLS_FILE.tmp" "$URLS_FILE"
+    
     echo -e "${GREEN}添加成功${NC}"
 }
 
@@ -139,27 +159,24 @@ delete_url() {
     fi
 
     echo -e "\n${YELLOW}当前监控列表：${NC}"
-    nl -w1 -s'. ' "$URLS_FILE"
+    show_urls
     
-    echo -e "\n${YELLOW}请输入要删除的序号：${NC}"
-    read -r number
+    echo -e "\n${YELLOW}请输入要删除的ID：${NC}"
+    read -r id
     
-    if [[ ! "$number" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}无效的序号${NC}"
+    # 检查ID是否存在
+    if ! jq -e "has(\"$id\")" "$URLS_FILE" > /dev/null; then
+        echo -e "${RED}ID不存在${NC}"
         return 1
     fi
+
+    # 显示要删除的项目信息
+    name=$(jq -r ".\"$id\".名称" "$URLS_FILE")
+    url=$(jq -r ".\"$id\".URL" "$URLS_FILE")
     
-    line=$(sed -n "${number}p" "$URLS_FILE")
-    if [ -z "$line" ]; then
-        echo -e "${RED}序号不存在${NC}"
-        return 1
-    fi
+    # 删除指定ID的数据
+    jq "del(.\"$id\")" "$URLS_FILE" > "$URLS_FILE.tmp" && mv "$URLS_FILE.tmp" "$URLS_FILE"
     
-    name="${line%|*}"
-    url="${line#*|}"
-    
-    # 删除指定行
-    sed -i "${number}d" "$URLS_FILE"
     echo -e "${GREEN}已删除监控：${NC}"
     echo -e "${BLUE}产品：${NC}$name"
     echo -e "${BLUE}网址：${NC}$url"
@@ -167,17 +184,13 @@ delete_url() {
 
 # 显示所有URL
 show_urls() {
-    if [ ! -s "$URLS_FILE" ]; then
+    if [ ! -s "$URLS_FILE" ] || [ "$(jq 'length' "$URLS_FILE")" = "0" ]; then
         echo -e "${YELLOW}监控列表为空${NC}"
         return
     fi
 
     echo -e "\n${YELLOW}当前监控列表：${NC}"
-    while IFS='|' read -r name url; do
-        echo -e "${BLUE}产品：${NC}$name"
-        echo -e "${BLUE}网址：${NC}$url"
-        echo "----------------------------------------"
-    done < "$URLS_FILE"
+    jq -r 'to_entries[] | "\n\(.key):\n📦 产品：\(.value.名称)\n🔗 链接：\(.value.URL)\(if .value.配置 then "\n⚙️ 配置：\(.value.配置)" else "" end)\n----------------------------------------"' "$URLS_FILE"
 }
 
 # 配置Telegram
@@ -220,12 +233,25 @@ check_python() {
     if ! command -v python3 &> /dev/null; then
         echo -e "${YELLOW}正在安装Python3...${NC}"
         if [ -f "/etc/debian_version" ]; then
-            sudo apt-get update && sudo apt-get install -y python3 python3-venv
+            apt-get update && apt-get install -y python3 python3-pip python3-venv
         elif [ -f "/etc/redhat-release" ]; then
-            sudo yum install -y python3 python3-venv
+            yum install -y python3 python3-pip python3-venv
         else
             echo -e "${RED}错误: 无法安装Python3，请手动安装${NC}"
             exit 1
+        fi
+    else
+        # 检查是否安装了python3-venv
+        if [ -f "/etc/debian_version" ]; then
+            if ! dpkg -l | grep -q python3-venv; then
+                echo -e "${YELLOW}正在安装python3-venv...${NC}"
+                apt-get update && apt-get install -y python3-venv
+            fi
+        elif [ -f "/etc/redhat-release" ]; then
+            if ! rpm -qa | grep -q python3-venv; then
+                echo -e "${YELLOW}正在安装python3-venv...${NC}"
+                yum install -y python3-venv
+            fi
         fi
     fi
 }
@@ -234,12 +260,38 @@ check_python() {
 check_venv() {
     if [ ! -d "venv" ]; then
         echo -e "${YELLOW}正在创建Python虚拟环境...${NC}"
+        # 确保python3-venv已安装
+        if [ -f "/etc/debian_version" ] && ! dpkg -l | grep -q python3-venv; then
+            echo -e "${YELLOW}安装python3-venv...${NC}"
+            apt-get update && apt-get install -y python3-venv
+        elif [ -f "/etc/redhat-release" ] && ! rpm -qa | grep -q python3-venv; then
+            echo -e "${YELLOW}安装python3-venv...${NC}"
+            yum install -y python3-venv
+        fi
+        
         python3 -m venv venv
         if [ $? -eq 0 ]; then
             echo -e "${GREEN}虚拟环境创建成功${NC}"
+            # 升级pip
+            source venv/bin/activate
+            python3 -m pip install --upgrade pip
         else
-            echo -e "${RED}虚拟环境创建失败${NC}"
-            exit 1
+            echo -e "${RED}虚拟环境创建失败，尝试修复...${NC}"
+            rm -rf venv
+            if [ -f "/etc/debian_version" ]; then
+                apt-get install -y python3-venv
+            elif [ -f "/etc/redhat-release" ]; then
+                yum install -y python3-venv
+            fi
+            python3 -m venv venv
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}虚拟环境创建成功${NC}"
+                source venv/bin/activate
+                python3 -m pip install --upgrade pip
+            else
+                echo -e "${RED}虚拟环境创建失败，请检查系统环境${NC}"
+                exit 1
+            fi
         fi
     fi
 }
@@ -261,9 +313,9 @@ install_requirements() {
     if ! command -v pip3 &> /dev/null; then
         echo -e "${YELLOW}正在安装pip...${NC}"
         if [ -f "/etc/debian_version" ]; then
-            sudo apt-get update && sudo apt-get install -y python3-pip
+            apt-get update && apt-get install -y python3-pip
         elif [ -f "/etc/redhat-release" ]; then
-            sudo yum install -y python3-pip
+            yum install -y python3-pip
         else
             echo -e "${RED}错误: 无法安装pip，请手动安装${NC}"
             exit 1
@@ -346,7 +398,7 @@ show_menu() {
         local pid=$(pgrep -f "python3 monitor.py")
         echo -e "${BLUE}进程信息: ${NC}PID=$pid, 内存占用=$(ps -o rss= -p "$pid" | awk '{printf "%.1fMB", $1/1024}')"
         if [ -f "$URLS_FILE" ]; then
-            local url_count=$(wc -l < "$URLS_FILE")
+            local url_count=$(jq 'length' "$URLS_FILE")
             echo -e "${BLUE}监控商品数: ${NC}$url_count"
         fi
     fi
@@ -396,3 +448,4 @@ main() {
 
 # 运行主程序
 main
+
