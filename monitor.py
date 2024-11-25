@@ -4,8 +4,9 @@ import time
 import logging
 import json
 import os
+import random
+import asyncio
 from datetime import datetime
-import cloudscraper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -22,16 +23,17 @@ CHOOSING, TYPING_URL = range(2)
 
 class VPSMonitor:
     def __init__(self):
-        self.urls_file = 'urls.txt'
+        self.urls_file = 'urls.json'  # 改用json文件
         self.config_file = 'config.json'
         self.load_config()
         # 使用 Cloudscraper 初始化
         self.scraper = cloudscraper.create_scraper()
         # 添加状态追踪字典
         self.stock_status = {}  # 存储每个URL的库存状态
-        self.notification_count = {}  # 存储每个URL的通知次数
+        self.notification_count = {}  # 存储每个URL的有货通知次数
         self.first_run = True  # 标记是否是首次运行
         self.product_names = {}  # 存储URL对应的产品名称
+        self.product_configs = {}  # 存储URL对应的配置信息
         # 创建Telegram应用
         self.app = None
         self.logger = logging.getLogger(__name__)
@@ -115,8 +117,11 @@ class VPSMonitor:
         for url, name in urls_dict.items():
             keyboard = [[InlineKeyboardButton("🗑️ 删除", callback_data=f'delete_{url}')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
+            message = f"📦 产品：{name}\n🔗 链接：{url}"
+            if url in self.product_configs:
+                message += f"\n⚙️ 配置：{self.product_configs[url].get('配置', '')}"
             await update.message.reply_text(
-                f"📦 产品：{name}\n🔗 链接：{url}",
+                message,
                 reply_markup=reply_markup
             )
 
@@ -141,9 +146,18 @@ class VPSMonitor:
         # 处理产品名称输入
         if context.user_data.get('waiting_for') == 'name':
             context.user_data['product_name'] = input_text
-            context.user_data['waiting_for'] = 'url'
+            context.user_data['waiting_for'] = 'config'
             await update.message.reply_text(
                 f"已记录产品名称：{input_text}\n"
+                "请输入产品配置信息（可选，直接回车跳过）："
+            )
+            return
+
+        # 处理配置信息输入
+        if context.user_data.get('waiting_for') == 'config':
+            context.user_data['product_config'] = input_text if input_text else None
+            context.user_data['waiting_for'] = 'url'
+            await update.message.reply_text(
                 "请输入监控网址（必须以 http:// 或 https:// 开头）："
             )
             return
@@ -151,6 +165,7 @@ class VPSMonitor:
         # 处理URL输入
         if context.user_data.get('waiting_for') == 'url':
             name = context.user_data.get('product_name')
+            config = context.user_data.get('product_config')
             url = input_text
 
             if not url.startswith(('http://', 'https://')):
@@ -165,7 +180,7 @@ class VPSMonitor:
             processing_message = await update.message.reply_text("⏳ 正在处理...")
 
             # 保存URL和产品名称
-            success, message = self.save_url(name, url)
+            success, message = self.save_url(name, url, config)
             if not success:
                 await processing_message.edit_text(f"❌ {message}")
                 # 重置状态
@@ -214,8 +229,11 @@ class VPSMonitor:
                 for url, name in urls_dict.items():
                     keyboard = [[InlineKeyboardButton("🗑️ 删除", callback_data=f'delete_{url}')]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
+                    message = f"📦 产品：{name}\n🔗 链接：{url}"
+                    if url in self.product_configs:
+                        message += f"\n⚙️ 配置：{self.product_configs[url].get('配置', '')}"
                     await query.message.reply_text(
-                        f"📦 产品：{name}\n🔗 链接：{url}",
+                        message,
                         reply_markup=reply_markup
                     )
 
@@ -262,7 +280,28 @@ class VPSMonitor:
     async def check_stock(self, url):
         """检查单个URL的库存状态"""
         try:
-            response = self.scraper.get(url)
+            # 添加随机延迟
+            await asyncio.sleep(random.uniform(1, 3))
+            
+            # 设置请求头
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            
+            response = self.scraper.get(url, headers=headers, timeout=30)
             if response.status_code == 200:
                 # 检查页面内容是否包含缺货关键词
                 out_of_stock_keywords = ['sold out', 'out of stock', '缺货', '售罄', '补货中']
@@ -275,78 +314,116 @@ class VPSMonitor:
             return None, f"检查失败: {str(e)}"
 
     def load_urls(self):
-        """从文件加载URL和产品名称"""
+        """从JSON文件加载URL数据"""
         urls_dict = {}
         try:
-            # 尝试不同的编码方式
-            encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'iso-8859-1']
-            content = None
-            
-            for encoding in encodings:
-                try:
-                    with open(self.urls_file, 'r', encoding=encoding) as f:
-                        content = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
-            
-            if content is None:
-                self.logger.error("无法以任何支持的编码方式读取URL文件")
-                return urls_dict
-                
-            for line in content.splitlines():
-                if line.strip() and '|' in line:
-                    name, url = line.strip().split('|', 1)
-                    urls_dict[url.strip()] = name.strip()
+            try:
+                with open(self.urls_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for id_str, info in data.items():
+                        url = info.get('URL', '')
+                        if url:
+                            urls_dict[url] = info.get('名称', '')
+                            self.product_names[url] = info.get('名称', '')
+                            if info.get('配置'):
+                                self.product_configs[url] = {'配置': info.get('配置')}
                     
-        except FileNotFoundError:
-            self.logger.info("URL文件不存在，将创建新文件")
-            with open(self.urls_file, 'w', encoding='utf-8') as f:
-                pass
-        except Exception as e:
-            self.logger.error(f"读取URL文件失败: {str(e)}")
-        
-        return urls_dict
-
-    def save_url(self, name, url):
-        """保存URL和产品名称到文件"""
-        try:
-            # 检查URL是否已存在
-            urls_dict = self.load_urls()
-            if url in urls_dict:
-                return False, "该网址已在监控列表中"
+                    self.logger.info(f"成功加载 {len(urls_dict)} 个URL")
+            except FileNotFoundError:
+                self.logger.info("URL文件不存在，将创建新文件")
+                with open(self.urls_file, 'w', encoding='utf-8') as f:
+                    json.dump({}, f, ensure_ascii=False, indent=4)
             
-            # 添加新URL
-            with open(self.urls_file, 'a') as f:
-                f.write(f"{name}|{url}\n")
-            self.product_names[url] = name
-            return True, url
+            return urls_dict
+                    
         except Exception as e:
-            self.logger.error(f"保存URL时出错: {str(e)}")
-            return False, "保存URL时出错"
+            self.logger.error(f"加载URL文件时出错: {str(e)}")
+            return {}
+
+    def save_url(self, name, url, config=None):
+        """保存URL到JSON文件"""
+        try:
+            # 读取现有数据
+            try:
+                with open(self.urls_file, 'r') as f:
+                    data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                data = {}
+            
+            # 检查URL是否已存在
+            url_exists = False
+            existing_id = None
+            for id_str, info in data.items():
+                if info.get('URL') == url:
+                    url_exists = True
+                    existing_id = id_str
+                    break
+            
+            if url_exists:
+                # 更新现有记录
+                data[existing_id] = {
+                    "名称": name,
+                    "URL": url,
+                    "配置": config if config else ""
+                }
+            else:
+                # 添加新记录
+                new_id = str(len(data) + 1)
+                data[new_id] = {
+                    "名称": name,
+                    "URL": url,
+                    "配置": config if config else ""
+                }
+            
+            # 保存到文件
+            with open(self.urls_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            
+            # 更新内存中的数据
+            self.product_names[url] = name
+            if config:
+                self.product_configs[url] = {'配置': config}
+            
+            return True, "保存成功"
+        except Exception as e:
+            self.logger.error(f"保存URL失败: {str(e)}")
+            return False, f"保存失败: {str(e)}"
 
     def remove_url(self, url):
-        """从文件中删除URL"""
+        """从JSON文件中删除URL"""
         try:
-            urls_dict = self.load_urls()
-            if url not in urls_dict:
-                return False, "未找到该监控网址"
+            # 读取现有数据
+            with open(self.urls_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
             
-            # 重写文件，排除要删除的URL
-            with open(self.urls_file, 'w') as f:
-                for u, name in urls_dict.items():
-                    if u != url:
-                        f.write(f"{name}|{u}\n")
+            # 查找并删除URL
+            target_id = None
+            for id_str, info in data.items():
+                if info.get('URL') == url:
+                    target_id = id_str
+                    break
             
-            # 清理状态
-            if url in self.stock_status:
-                del self.stock_status[url]
-            if url in self.notification_count:
-                del self.notification_count[url]
-            if url in self.product_names:
-                del self.product_names[url]
+            if target_id:
+                del data[target_id]
                 
-            return True, "删除成功"
+                # 保存更新后的数据
+                with open(self.urls_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=4)
+                
+                # 清理内存中的数据
+                if url in self.product_names:
+                    del self.product_names[url]
+                if url in self.product_configs:
+                    del self.product_configs[url]
+                if url in self.stock_status:
+                    del self.stock_status[url]
+                if url in self.notification_count:
+                    del self.notification_count[url]
+                
+                return True, "删除成功"
+            else:
+                return False, "未找到该URL"
+                
         except Exception as e:
             self.logger.error(f"删除URL失败: {str(e)}")
             return False, f"删除失败: {str(e)}"
@@ -360,8 +437,7 @@ class VPSMonitor:
                 
             await self.app.bot.send_message(
                 chat_id=self.chat_id,
-                text=message,
-                parse_mode='HTML'
+                text=message
             )
             self.logger.info("Telegram 通知发送成功")
         except Exception as e:
@@ -389,7 +465,8 @@ class VPSMonitor:
             await self.send_telegram_notification(
                 "🚀 VPS监控程序已启动\n"
                 f"⏰ 当前检查间隔：{self.check_interval}秒\n\n"
-                "💡 使用 /start 开始操作，/help 查看帮助"
+                "💡 使用 /start 开始操作，/help 查看帮助\n\n\n"
+                "🔄 正在进行启动检查..."
             )
             
             self.logger.info("开始监控...")
@@ -409,14 +486,18 @@ class VPSMonitor:
                             )
                         else:
                             status = "🟢 有货" if stock_available else "🔴 无货"
-                            await self.send_telegram_notification(
+                            message = (
                                 f"📦 产品：{name}\n"
                                 f"🔗 链接：{url}\n"
-                                f"📊 当前状态：{status}"
                             )
-                        # 记录初始状态
-                        self.stock_status[url] = stock_available
-                        self.notification_count[url] = 0
+                            if url in self.product_configs:
+                                config_info = self.product_configs[url].get('配置', '')
+                                message += f"⚙️ 配置：{config_info}\n"
+                            message += f"📊 当前状态：{status}"
+                            await self.send_telegram_notification(message)
+                            # 记录初始状态
+                            self.stock_status[url] = stock_available
+                            self.notification_count[url] = 3  # 设置为3，这样就不会再发送后续通知
                     except Exception as e:
                         self.logger.error(f"初始检查URL {url} 时出错: {str(e)}")
                         continue
@@ -443,20 +524,53 @@ class VPSMonitor:
                                 self.notification_count[url] = 0
                             elif stock_available != self.stock_status[url]:
                                 status = "🟢 有货" if stock_available else "🔴 无货"
-                                await self.send_telegram_notification(
+                                message = (
                                     f"📦 产品：{name}\n"
                                     f"🔗 链接：{url}\n"
-                                    f"📊 状态：{status}"
                                 )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                message += f"📊 当前状态：{status}"
+                                await self.send_telegram_notification(message)
                                 self.stock_status[url] = stock_available
-                                self.notification_count[url] = 0
-                            elif stock_available and self.notification_count[url] < 3:
-                                # 持续有货时，最多发送3次通知
-                                await self.send_telegram_notification(
+                                self.notification_count[url] = 0 if not stock_available else 1  # 如果有货，开始计数
+                            elif stock_available and not self.stock_status[url]:
+                                message = (
                                     f"📦 产品：{name}\n"
                                     f"🔗 链接：{url}\n"
-                                    f"📊 状态：🟢 仍然有货"
                                 )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                message += "📊 状态：🟢 现在有货了！"
+                                await self.send_telegram_notification(message)
+                                self.stock_status[url] = True
+                                self.notification_count[url] = 1  # 开始计数连续通知
+                            # 状态从有货变为无货时
+                            elif not stock_available and self.stock_status[url]:
+                                message = (
+                                    f"📦 产品：{name}\n"
+                                    f"🔗 链接：{url}\n"
+                                )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                message += "📊 状态：🔴 已经无货"
+                                await self.send_telegram_notification(message)
+                                self.stock_status[url] = False
+                                self.notification_count[url] = 0  # 重置有货通知计数
+                            # 持续有货且未达到3次通知限制时
+                            elif stock_available and self.stock_status[url] and self.notification_count[url] < 3:
+                                message = (
+                                    f"📦 产品：{name}\n"
+                                    f"🔗 链接：{url}\n"
+                                )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                message += f"📊 状态：🟢 仍然有货 (通知 {self.notification_count[url] + 1}/3)"
+                                await self.send_telegram_notification(message)
                                 self.notification_count[url] += 1
 
                         except Exception as e:
