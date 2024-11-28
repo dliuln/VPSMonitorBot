@@ -17,6 +17,7 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
+import urllib.parse
 
 # 状态定义
 CHOOSING, TYPING_URL = range(2)
@@ -26,8 +27,16 @@ class VPSMonitor:
         self.urls_file = 'urls.json'  # 改用json文件
         self.config_file = 'config.json'
         self.load_config()
-        # 使用 Cloudscraper 初始化
-        self.scraper = cloudscraper.create_scraper()
+        # 使用 Cloudscraper 初始化，添加更多浏览器参数
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'mobile': False,
+                'custom': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            debug=True
+        )
         # 添加状态追踪字典
         self.stock_status = {}  # 存储每个URL的库存状态
         self.notification_count = {}  # 存储每个URL的有货通知次数
@@ -37,6 +46,9 @@ class VPSMonitor:
         # 创建Telegram应用
         self.app = None
         self.logger = logging.getLogger(__name__)
+        # 存储cookies和tokens
+        self.cookies = {}
+        self.cf_tokens = {}
 
     async def initialize(self):
         """初始化应用"""
@@ -277,13 +289,52 @@ class VPSMonitor:
             self.logger.error(f"处理按钮点击时出错: {str(e)}")
             await query.message.reply_text("❌ 操作失败，请重试")
 
+    def clean_url(self, url):
+        """清理URL，移除Cloudflare token等参数"""
+        try:
+            # 解析URL
+            parsed = urllib.parse.urlparse(url)
+            # 解析查询参数
+            query_params = urllib.parse.parse_qs(parsed.query)
+            
+            # 移除Cloudflare相关参数
+            cf_params = [
+                '__cf_chl_rt_tk',
+                '__cf_chl_f_tk',
+                '__cf_chl_tk',
+                'cf_chl_seq_tk'
+            ]
+            for param in cf_params:
+                query_params.pop(param, None)
+            
+            # 重建查询字符串
+            clean_query = urllib.parse.urlencode(query_params, doseq=True)
+            
+            # 重建URL
+            clean_url = urllib.parse.urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                clean_query,
+                ''
+            ))
+            
+            return clean_url
+        except Exception as e:
+            self.logger.error(f"清理URL时出错: {str(e)}")
+            return url
+
     async def check_stock(self, url):
         """检查单个URL的库存状态"""
         try:
             # 添加随机延迟
-            await asyncio.sleep(random.uniform(1, 3))
+            await asyncio.sleep(random.uniform(2, 5))
             
-            # 设置请求头
+            # 清理URL
+            clean_url = self.clean_url(url)
+            
+            # 基础请求头
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -298,20 +349,330 @@ class VPSMonitor:
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
+                'Upgrade-Insecure-Requests': '1',
+                'Connection': 'keep-alive',
+                'DNT': '1'
             }
+
+            response = None
             
-            response = self.scraper.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                # 检查页面内容是否包含缺货关键词
-                out_of_stock_keywords = ['sold out', 'out of stock', '缺货', '售罄', '补货中']
-                content = response.text.lower()
-                is_out_of_stock = any(keyword in content for keyword in out_of_stock_keywords)
-                return not is_out_of_stock, None
+            # 特殊处理lala.gg
+            if 'lala.gg' in clean_url:
+                try:
+                    # 先访问主页获取必要的cookies和tokens
+                    home_url = 'https://lala.gg/'
+                    if home_url not in self.cookies:
+                        headers['Referer'] = 'https://www.google.com/'
+                        home_response = self.scraper.get(
+                            home_url,
+                            headers=headers,
+                            timeout=30,
+                            allow_redirects=True
+                        )
+                        if home_response.status_code == 200:
+                            self.cookies[home_url] = home_response.cookies
+                            # 提取任何必要的tokens
+                            for cookie in home_response.cookies:
+                                if 'cf_' in cookie.name:
+                                    self.cf_tokens[cookie.name] = cookie.value
+                    
+                    # 设置特定的请求头
+                    headers['Referer'] = home_url
+                    headers['Origin'] = 'https://lala.gg'
+                    
+                    # 使用获取到的cookies访问目标页面
+                    response = self.scraper.get(
+                        clean_url,
+                        headers=headers,
+                        cookies=self.cookies.get(home_url),
+                        timeout=30,
+                        allow_redirects=True
+                    )
+                    
+                    # 如果返回403，尝试刷新cookies
+                    if response.status_code == 403:
+                        self.cookies.pop(home_url, None)
+                        return None, "需要刷新会话，将在下次检查时重试"
+                        
+                except Exception as e:
+                    self.logger.error(f"访问lala.gg时出错: {str(e)}")
+                    return None, f"访问失败: {str(e)}"
+
+            # 特殊处理dmit.io
+            elif 'dmit.io' in clean_url:
+                try:
+                    home_url = 'https://www.dmit.io/'
+                    if home_url not in self.cookies:
+                        home_response = self.scraper.get(
+                            home_url,
+                            headers=headers,
+                            timeout=30,
+                            allow_redirects=True
+                        )
+                        if home_response.status_code == 200:
+                            self.cookies[home_url] = home_response.cookies
+                    
+                    headers['Referer'] = home_url
+                    response = self.scraper.get(
+                        clean_url,
+                        headers=headers,
+                        cookies=self.cookies.get(home_url),
+                        timeout=30,
+                        allow_redirects=True
+                    )
+                except Exception as e:
+                    self.logger.error(f"访问dmit.io时出错: {str(e)}")
+                    return None, f"访问失败: {str(e)}"
+
+            # 特殊处理alphavps.com
+            elif 'alphavps.com' in clean_url:
+                try:
+                    home_url = 'https://alphavps.com/'
+                    if home_url not in self.cookies:
+                        home_response = self.scraper.get(
+                            home_url,
+                            headers=headers,
+                            timeout=30,
+                            allow_redirects=True
+                        )
+                        if home_response.status_code == 200:
+                            self.cookies[home_url] = home_response.cookies
+                    
+                    headers['Referer'] = home_url
+                    response = self.scraper.get(
+                        clean_url,
+                        headers=headers,
+                        cookies=self.cookies.get(home_url),
+                        timeout=30,
+                        allow_redirects=True
+                    )
+                except Exception as e:
+                    self.logger.error(f"访问alphavps.com时出错: {str(e)}")
+                    return None, f"访问失败: {str(e)}"
+
             else:
-                return None, f"请求失败 (HTTP {response.status_code})"
+                # 其他网站的常规处理
+                response = self.scraper.get(clean_url, headers=headers, timeout=30)
+            
+            # 检查是否成功获取页面
+            if not response or response.status_code != 200:
+                return None, f"请求失败 (HTTP {response.status_code if response else 'No response'})"
+                
+            # 获取页面内容
+            content = response.text.lower()
+            
+            # 如果页面包含Cloudflare验证页面的特征，认为请求失败
+            if 'just a moment' in content or 'checking if the site connection is secure' in content:
+                return None, "无法绕过Cloudflare保护，将在下次检查时重试"
+            
+            # 检查页面内容是否包含缺货关键词
+            out_of_stock_keywords = [
+                'sold out', 'out of stock', '缺货', '售罄', '补货中',
+                'currently unavailable', 'not available', '暂时缺货',
+                'temporarily out of stock', '已售完', '库存不足',
+                'out-of-stock', 'unavailable', '无货', '断货',
+                'not in stock', 'no stock', '无库存', 'stock: 0'
+            ]
+            
+            # 检查页面内容是否包含有货关键词
+            in_stock_keywords = [
+                'add to cart', 'buy now', '立即购买', '加入购物车',
+                'in stock', '有货', '现货', 'available', 'order now',
+                'purchase', 'checkout', '订购', '下单', '继续', '繼續',
+                'configure', 'select options', 'stock: 1', 'stock: 2',
+                'stock: 3', 'stock: 4', 'stock: 5', 'configure now'
+            ]
+            
+            # 检查是否包含订单表单或价格选择器（通常表示可以购买）
+            order_indicators = [
+                'form', 'price', 'quantity', 'payment', 'checkout',
+                'cart', 'billing', '价格', '数量', '支付',
+                'order form', 'purchase form', 'configure now'
+            ]
+            
+            # 检查各种状态指标
+            is_out_of_stock = any(keyword in content for keyword in out_of_stock_keywords)
+            is_in_stock = any(keyword in content for keyword in in_stock_keywords)
+            has_order_form = any(indicator in content for indicator in order_indicators)
+            
+            # 特殊处理lala.gg的库存检测
+            if 'lala.gg' in clean_url:
+                if 'out of stock' in content or 'sold out' in content:
+                    return False, None
+                if 'add to cart' in content and 'price' in content:
+                    return True, None
+                if any(f'stock: {i}' in content for i in range(1, 6)):
+                    return True, None
+                return False, None
+            
+            # 特殊处理dmit.io的库存检测
+            elif 'dmit.io' in clean_url:
+                if 'out of stock' in content or 'sold out' in content:
+                    return False, None
+                if ('configure' in content or 'add to cart' in content) and 'price' in content:
+                    return True, None
+                return False, None
+            
+            # 特殊处理alphavps.com的库存检测
+            elif 'alphavps.com' in clean_url:
+                if 'out of stock' in content or 'sold out' in content or '缺货' in content:
+                    return False, None
+                if ('price' in content and 'order' in content) or ('购买' in content and '价格' in content):
+                    if 'add to cart' in content or 'buy now' in content or '立即购买' in content:
+                        return True, None
+                return False, None
+            
+            # 其他网站的通用检测逻辑
+            else:
+                if not is_out_of_stock and (is_in_stock or has_order_form) and len(content) > 1000:
+                    return True, None
+                elif is_out_of_stock:
+                    return False, None
+                else:
+                    return False, "无法确定库存状态"
+            
         except Exception as e:
+            self.logger.error(f"检查失败: {str(e)}")
             return None, f"检查失败: {str(e)}"
+
+    async def monitor(self):
+        """主监控循环"""
+        try:
+            # 初始化 Telegram Bot
+            await self.initialize()
+            
+            # 发送启动通知
+            await self.send_telegram_notification(
+                "🚀 VPS监控程序已启动\n"
+                f"⏰ 当前检查间隔：{self.check_interval}秒\n\n"
+                "💡 使用 /start 开始操作，/help 查看帮助\n\n\n"
+                "🔄 正在进行启动检查..."
+            )
+            
+            self.logger.info("开始监控...")
+            
+            # 启动时进行初始检查
+            urls_dict = self.load_urls()
+            if urls_dict:
+                await self.send_telegram_notification("🔄 正在进行启动检查...")
+                for url, name in urls_dict.items():
+                    try:
+                        stock_available, error = await self.check_stock(url)
+                        if error:
+                            await self.send_telegram_notification(
+                                f"📦 产品：{name}\n"
+                                f"🔗 链接：{url}\n"
+                                f"❗ 检查失败: {error}\n"
+                                "将在下一个检查周期重试\n\n"
+                                "使用 /list 命令查看所有监控商品"
+                            )
+                        else:
+                            status = "🟢 有货" if stock_available else "🔴 无货"
+                            message = (
+                                f"📦 产品：{name}\n"
+                                f"🔗 链接：{url}\n"
+                            )
+                            if url in self.product_configs:
+                                config_info = self.product_configs[url].get('配置', '')
+                                message += f"⚙️ 配置：{config_info}\n"
+                            message += f"📊 当前状态：{status}"
+                            await self.send_telegram_notification(message)
+                            # 记录初始状态
+                            self.stock_status[url] = stock_available
+                            self.notification_count[url] = 0
+                    except Exception as e:
+                        self.logger.error(f"初始检查URL {url} 时出错: {str(e)}")
+                        continue
+                
+                await self.send_telegram_notification("✅ 启动检查完成")
+            
+            # 保持程序运行
+            while True:
+                try:
+                    # 加载URL列表
+                    urls_dict = self.load_urls()
+                    if not urls_dict:
+                        self.logger.info("没有要监控的URL")
+                        await asyncio.sleep(self.check_interval)
+                        continue
+
+                    for url, name in urls_dict.items():
+                        try:
+                            stock_available, error = await self.check_stock(url)
+                            
+                            if error:
+                                # 如果检查出错，记录错误但继续监控
+                                self.logger.error(f"检查URL {url} 时出错: {error}")
+                                await self.send_telegram_notification(
+                                    f"📦 产品：{name}\n"
+                                    f"🔗 链接：{url}\n"
+                                    f"❗ 检查失败: {error}\n"
+                                    "将在下一个检查周期重试"
+                                )
+                                continue
+                                
+                            # 初始化状态
+                            if url not in self.stock_status:
+                                self.stock_status[url] = stock_available
+                                self.notification_count[url] = 0
+                                continue
+                            
+                            # 状态变化检测和通知逻辑
+                            if stock_available != self.stock_status[url]:
+                                message = (
+                                    f"📦 产品：{name}\n"
+                                    f"🔗 链接：{url}\n"
+                                )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                
+                                if stock_available:
+                                    # 从无货变为有货
+                                    message += "📊 状态：🟢 补货啦！商品已经有货"
+                                    self.notification_count[url] = 1
+                                else:
+                                    # 从有货变为无货
+                                    message += "📊 状态：🔴 已经无货"
+                                    self.notification_count[url] = 0
+                                
+                                await self.send_telegram_notification(message)
+                                self.stock_status[url] = stock_available
+                            
+                            # 持续有货的通知逻辑（最多通知3次）
+                            elif stock_available and self.notification_count[url] < 3:
+                                message = (
+                                    f"📦 产品：{name}\n"
+                                    f"🔗 链接：{url}\n"
+                                )
+                                if url in self.product_configs:
+                                    config_info = self.product_configs[url].get('配置', '')
+                                    message += f"⚙️ 配置：{config_info}\n"
+                                message += f"📊 状态：🟢 仍然有货 (通知 {self.notification_count[url] + 1}/3)"
+                                await self.send_telegram_notification(message)
+                                self.notification_count[url] += 1
+
+                        except Exception as e:
+                            self.logger.error(f"检查URL {url} 时出错: {str(e)}")
+                            continue
+
+                    await asyncio.sleep(self.check_interval)
+                except Exception as e:
+                    self.logger.error(f"监控循环出错: {str(e)}")
+                    await asyncio.sleep(60)  # 出错后等待1分钟再继续
+
+        except Exception as e:
+            self.logger.error(f"监控程序出错: {str(e)}")
+            raise
+        finally:
+            # 清理资源
+            try:
+                if self.app:
+                    await self.app.updater.stop()
+                    await self.app.stop()
+                    await self.app.shutdown()
+            except Exception as e:
+                self.logger.error(f"关闭应用时出错: {str(e)}")
 
     def load_urls(self):
         """从JSON文件加载URL数据"""
@@ -454,146 +815,6 @@ class VPSMonitor:
         except Exception as e:
             self.logger.error(f"加载配置文件失败: {str(e)}")
             exit(1)
-
-    async def monitor(self):
-        """主监控循环"""
-        try:
-            # 初始化 Telegram Bot
-            await self.initialize()
-            
-            # 发送启动通知
-            await self.send_telegram_notification(
-                "🚀 VPS监控程序已启动\n"
-                f"⏰ 当前检查间隔：{self.check_interval}秒\n\n"
-                "💡 使用 /start 开始操作，/help 查看帮助\n\n\n"
-                "🔄 正在进行启动检查..."
-            )
-            
-            self.logger.info("开始监控...")
-            
-            # 启动时进行初始检查
-            urls_dict = self.load_urls()
-            if urls_dict:
-                await self.send_telegram_notification("🔄 正在进行启动检查...")
-                for url, name in urls_dict.items():
-                    try:
-                        stock_available, error = await self.check_stock(url)
-                        if error:
-                            await self.send_telegram_notification(
-                                f"📦 产品：{name}\n"
-                                f"🔗 链接：{url}\n"
-                                f"❗ 检查失败: {error}"
-                            )
-                        else:
-                            status = "🟢 有货" if stock_available else "🔴 无货"
-                            message = (
-                                f"📦 产品：{name}\n"
-                                f"🔗 链接：{url}\n"
-                            )
-                            if url in self.product_configs:
-                                config_info = self.product_configs[url].get('配置', '')
-                                message += f"⚙️ 配置：{config_info}\n"
-                            message += f"📊 当前状态：{status}"
-                            await self.send_telegram_notification(message)
-                            # 记录初始状态
-                            self.stock_status[url] = stock_available
-                            self.notification_count[url] = 3  # 设置为3，这样就不会再发送后续通知
-                    except Exception as e:
-                        self.logger.error(f"初始检查URL {url} 时出错: {str(e)}")
-                        continue
-                
-                await self.send_telegram_notification("✅ 启动检查完成")
-            
-            # 保持程序运行
-            while True:
-                try:
-                    # 加载URL列表
-                    urls_dict = self.load_urls()
-                    if not urls_dict:
-                        self.logger.info("没有要监控的URL")
-                        await asyncio.sleep(self.check_interval)
-                        continue
-
-                    for url, name in urls_dict.items():
-                        try:
-                            stock_available, error = await self.check_stock(url)
-                            
-                            # 状态发生变化时发送通知
-                            if url not in self.stock_status:
-                                self.stock_status[url] = stock_available
-                                self.notification_count[url] = 0
-                            elif stock_available != self.stock_status[url]:
-                                status = "🟢 有货" if stock_available else "🔴 无货"
-                                message = (
-                                    f"📦 产品：{name}\n"
-                                    f"🔗 链接：{url}\n"
-                                )
-                                if url in self.product_configs:
-                                    config_info = self.product_configs[url].get('配置', '')
-                                    message += f"⚙️ 配置：{config_info}\n"
-                                message += f"📊 当前状态：{status}"
-                                await self.send_telegram_notification(message)
-                                self.stock_status[url] = stock_available
-                                self.notification_count[url] = 0 if not stock_available else 1  # 如果有货，开始计数
-                            elif stock_available and not self.stock_status[url]:
-                                message = (
-                                    f"📦 产品：{name}\n"
-                                    f"🔗 链接：{url}\n"
-                                )
-                                if url in self.product_configs:
-                                    config_info = self.product_configs[url].get('配置', '')
-                                    message += f"⚙️ 配置：{config_info}\n"
-                                message += "📊 状态：🟢 现在有货了！"
-                                await self.send_telegram_notification(message)
-                                self.stock_status[url] = True
-                                self.notification_count[url] = 1  # 开始计数连续通知
-                            # 状态从有货变为无货时
-                            elif not stock_available and self.stock_status[url]:
-                                message = (
-                                    f"📦 产品：{name}\n"
-                                    f"🔗 链接：{url}\n"
-                                )
-                                if url in self.product_configs:
-                                    config_info = self.product_configs[url].get('配置', '')
-                                    message += f"⚙️ 配置：{config_info}\n"
-                                message += "📊 状态：🔴 已经无货"
-                                await self.send_telegram_notification(message)
-                                self.stock_status[url] = False
-                                self.notification_count[url] = 0  # 重置有货通知计数
-                            # 持续有货且未达到3次通知限制时
-                            elif stock_available and self.stock_status[url] and self.notification_count[url] < 3:
-                                message = (
-                                    f"📦 产品：{name}\n"
-                                    f"🔗 链接：{url}\n"
-                                )
-                                if url in self.product_configs:
-                                    config_info = self.product_configs[url].get('配置', '')
-                                    message += f"⚙️ 配置：{config_info}\n"
-                                message += f"📊 状态：🟢 仍然有货 (通知 {self.notification_count[url] + 1}/3)"
-                                await self.send_telegram_notification(message)
-                                self.notification_count[url] += 1
-
-                        except Exception as e:
-                            self.logger.error(f"检查URL {url} 时出错: {str(e)}")
-                            continue
-
-                    await asyncio.sleep(self.check_interval)
-                except Exception as e:
-                    self.logger.error(f"监控循环出错: {str(e)}")
-                    await asyncio.sleep(60)  # 出错后等待1分钟再继续
-
-        except Exception as e:
-            self.logger.error(f"监控程序出错: {str(e)}")
-            raise
-        finally:
-            # 清理资源
-            try:
-                if self.app:
-                    await self.app.updater.stop()
-                    await self.app.stop()
-                    await self.app.shutdown()
-            except Exception as e:
-                self.logger.error(f"关闭应用时出错: {str(e)}")
 
 async def main():
     """主程序入口"""
