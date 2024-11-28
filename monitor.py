@@ -18,6 +18,7 @@ from telegram.ext import (
     filters
 )
 import urllib.parse
+import brotli
 
 # 状态定义
 CHOOSING, TYPING_URL = range(2)
@@ -340,8 +341,7 @@ class VPSMonitor:
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
+                'Cache-Control': 'max-age=0',
                 'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
                 'Sec-Ch-Ua-Mobile': '?0',
                 'Sec-Ch-Ua-Platform': '"Windows"',
@@ -350,180 +350,67 @@ class VPSMonitor:
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1',
-                'Connection': 'keep-alive',
-                'DNT': '1'
+                'Connection': 'keep-alive'
             }
 
-            response = None
-            
-            # 特殊处理lala.gg
-            if 'lala.gg' in clean_url:
-                try:
-                    # 先访问主页获取必要的cookies和tokens
-                    home_url = 'https://lala.gg/'
-                    if home_url not in self.cookies:
-                        headers['Referer'] = 'https://www.google.com/'
-                        home_response = self.scraper.get(
-                            home_url,
-                            headers=headers,
-                            timeout=30,
-                            allow_redirects=True
-                        )
-                        if home_response.status_code == 200:
-                            self.cookies[home_url] = home_response.cookies
-                            # 提取任何必要的tokens
-                            for cookie in home_response.cookies:
-                                if 'cf_' in cookie.name:
-                                    self.cf_tokens[cookie.name] = cookie.value
-                    
-                    # 设置特定的请求头
-                    headers['Referer'] = home_url
-                    headers['Origin'] = 'https://lala.gg'
-                    
-                    # 使用获取到的cookies访问目标页面
-                    response = self.scraper.get(
-                        clean_url,
-                        headers=headers,
-                        cookies=self.cookies.get(home_url),
-                        timeout=30,
-                        allow_redirects=True
-                    )
-                    
-                    # 如果返回403，尝试刷新cookies
-                    if response.status_code == 403:
-                        self.cookies.pop(home_url, None)
-                        return None, "需要刷新会话，将在下次检查时重试"
-                        
-                except Exception as e:
-                    self.logger.error(f"访问lala.gg时出错: {str(e)}")
-                    return None, f"访问失败: {str(e)}"
-
-            # 特殊处理dmit.io
-            elif 'dmit.io' in clean_url:
-                try:
-                    home_url = 'https://www.dmit.io/'
-                    if home_url not in self.cookies:
-                        home_response = self.scraper.get(
-                            home_url,
-                            headers=headers,
-                            timeout=30,
-                            allow_redirects=True
-                        )
-                        if home_response.status_code == 200:
-                            self.cookies[home_url] = home_response.cookies
-                    
-                    headers['Referer'] = home_url
-                    response = self.scraper.get(
-                        clean_url,
-                        headers=headers,
-                        cookies=self.cookies.get(home_url),
-                        timeout=30,
-                        allow_redirects=True
-                    )
-                except Exception as e:
-                    self.logger.error(f"访问dmit.io时出错: {str(e)}")
-                    return None, f"访问失败: {str(e)}"
-
-            # 特殊处理alphavps.com
-            elif 'alphavps.com' in clean_url:
-                try:
-                    home_url = 'https://alphavps.com/'
-                    if home_url not in self.cookies:
-                        home_response = self.scraper.get(
-                            home_url,
-                            headers=headers,
-                            timeout=30,
-                            allow_redirects=True
-                        )
-                        if home_response.status_code == 200:
-                            self.cookies[home_url] = home_response.cookies
-                    
-                    headers['Referer'] = home_url
-                    response = self.scraper.get(
-                        clean_url,
-                        headers=headers,
-                        cookies=self.cookies.get(home_url),
-                        timeout=30,
-                        allow_redirects=True
-                    )
-                except Exception as e:
-                    self.logger.error(f"访问alphavps.com时出错: {str(e)}")
-                    return None, f"访问失败: {str(e)}"
-
-            else:
-                # 其他网站的常规处理
+            try:
                 response = self.scraper.get(clean_url, headers=headers, timeout=30)
-            
-            # 检查是否成功获取页面
-            if not response or response.status_code != 200:
-                return None, f"请求失败 (HTTP {response.status_code if response else 'No response'})"
                 
-            # 获取页面内容
-            content = response.text.lower()
-            
-            # 如果页面包含Cloudflare验证页面的特征，认为请求失败
-            if 'just a moment' in content or 'checking if the site connection is secure' in content:
-                return None, "无法绕过Cloudflare保护，将在下次检查时重试"
-            
-            # 检查页面内容是否包含缺货关键词
-            out_of_stock_keywords = [
-                'sold out', 'out of stock', '缺货', '售罄', '补货中',
-                'currently unavailable', 'not available', '暂时缺货',
-                'temporarily out of stock', '已售完', '库存不足',
-                'out-of-stock', 'unavailable', '无货', '断货',
-                'not in stock', 'no stock', '无库存', 'stock: 0'
-            ]
-            
-            # 检查页面内容是否包含有货关键词
-            in_stock_keywords = [
-                'add to cart', 'buy now', '立即购买', '加入购物车',
-                'in stock', '有货', '现货', 'available', 'order now',
-                'purchase', 'checkout', '订购', '下单', '继续', '繼續',
-                'configure', 'select options', 'stock: 1', 'stock: 2',
-                'stock: 3', 'stock: 4', 'stock: 5', 'configure now'
-            ]
-            
-            # 检查是否包含订单表单或价格选择器（通常表示可以购买）
-            order_indicators = [
-                'form', 'price', 'quantity', 'payment', 'checkout',
-                'cart', 'billing', '价格', '数量', '支付',
-                'order form', 'purchase form', 'configure now'
-            ]
-            
-            # 检查各种状态指标
-            is_out_of_stock = any(keyword in content for keyword in out_of_stock_keywords)
-            is_in_stock = any(keyword in content for keyword in in_stock_keywords)
-            has_order_form = any(indicator in content for indicator in order_indicators)
-            
-            # 特殊处理lala.gg的库存检测
-            if 'lala.gg' in clean_url:
-                if 'out of stock' in content or 'sold out' in content:
-                    return False, None
-                if 'add to cart' in content and 'price' in content:
-                    return True, None
-                if any(f'stock: {i}' in content for i in range(1, 6)):
-                    return True, None
-                return False, None
-            
-            # 特殊处理dmit.io的库存检测
-            elif 'dmit.io' in clean_url:
-                if 'out of stock' in content or 'sold out' in content:
-                    return False, None
-                if ('configure' in content or 'add to cart' in content) and 'price' in content:
-                    return True, None
-                return False, None
-            
-            # 特殊处理alphavps.com的库存检测
-            elif 'alphavps.com' in clean_url:
-                if 'out of stock' in content or 'sold out' in content or '缺货' in content:
-                    return False, None
-                if ('price' in content and 'order' in content) or ('购买' in content and '价格' in content):
-                    if 'add to cart' in content or 'buy now' in content or '立即购买' in content:
-                        return True, None
-                return False, None
-            
-            # 其他网站的通用检测逻辑
-            else:
+                # 检查是否成功获取页面
+                if not response or response.status_code != 200:
+                    return None, f"请求失败 (HTTP {response.status_code if response else 'No response'})"
+                
+                # 获取页面内容，尝试处理不同的编码
+                try:
+                    content = response.text.lower()
+                except UnicodeDecodeError:
+                    try:
+                        content = response.content.decode('utf-8').lower()
+                    except UnicodeDecodeError:
+                        try:
+                            content = response.content.decode('latin1').lower()
+                        except UnicodeDecodeError:
+                            return None, "无法解码页面内容"
+                
+                # 检查内容是否为空或过短
+                if not content or len(content.strip()) < 100:
+                    return None, "页面内容为空或过短"
+                
+                # 如果页面包含Cloudflare验证页面的特征，认为请求失败
+                if 'just a moment' in content or 'checking if the site connection is secure' in content:
+                    return None, "无法绕过Cloudflare保护，将在下次检查时重试"
+                
+                # 检查页面内容是否包含缺货关键词
+                out_of_stock_keywords = [
+                    'sold out', 'out of stock', '缺货', '售罄', '补货中',
+                    'currently unavailable', 'not available', '暂时缺货',
+                    'temporarily out of stock', '已售完', '库存不足',
+                    'out-of-stock', 'unavailable', '无货', '断货',
+                    'not in stock', 'no stock', '无库存', 'stock: 0'
+                ]
+                
+                # 检查页面内容是否包含有货关键词
+                in_stock_keywords = [
+                    'add to cart', 'buy now', '立即购买', '加入购物车',
+                    'in stock', '有货', '现货', 'available', 'order now',
+                    'purchase', 'checkout', '订购', '下单', '继续', '繼續',
+                    'configure', 'select options', 'stock: 1', 'stock: 2',
+                    'stock: 3', 'stock: 4', 'stock: 5', 'configure now','Continue'
+                ]
+                
+                # 检查是否存在订单表单和价格选择器（通常表示可以购买）
+                order_indicators = [
+                    'form', 'price', 'quantity', 'payment', 'checkout',
+                    'cart', 'billing', '价格', '数量', '支付',
+                    'order form', 'purchase form', 'configure now'
+                ]
+                
+                # 检查各种状态指标
+                is_out_of_stock = any(keyword in content for keyword in out_of_stock_keywords)
+                is_in_stock = any(keyword in content for keyword in in_stock_keywords)
+                has_order_form = any(indicator in content for indicator in order_indicators)
+                
+                # 检测库存状态
                 if not is_out_of_stock and (is_in_stock or has_order_form) and len(content) > 1000:
                     return True, None
                 elif is_out_of_stock:
@@ -531,6 +418,10 @@ class VPSMonitor:
                 else:
                     return False, "无法确定库存状态"
             
+            except Exception as e:
+                self.logger.error(f"检查失败: {str(e)}")
+                return None, f"检查失败: {str(e)}"
+        
         except Exception as e:
             self.logger.error(f"检查失败: {str(e)}")
             return None, f"检查失败: {str(e)}"
@@ -573,8 +464,7 @@ class VPSMonitor:
                                 f"🔗 链接：{url}\n"
                             )
                             if url in self.product_configs:
-                                config_info = self.product_configs[url].get('配置', '')
-                                message += f"⚙️ 配置：{config_info}\n"
+                                message += f"⚙️ 配置：{self.product_configs[url].get('配置', '')}\n"
                             message += f"📊 当前状态：{status}"
                             await self.send_telegram_notification(message)
                             # 记录初始状态
