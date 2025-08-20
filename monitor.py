@@ -382,17 +382,17 @@ class VPSMonitor:
                 
                 # 检查页面内容是否包含缺货关键词
                 out_of_stock_keywords = [
-                    'sold out', 'out of stock', '缺货', 'Sorry, this item is currently unavailable.
-', '售罄', '补货中',
+                    'sold out', 'out of stock', '缺货', '售罄', '补货中',
                     'currently unavailable', 'not available', '暂时缺货',
                     'temporarily out of stock', '已售完', '库存不足',
                     'out-of-stock', 'unavailable', '无货', '断货',
-                    'not in stock', 'no stock', '无库存', 'stock: 0'
+                    'not in stock', 'no stock', '无库存', 'stock: 0',
+                    'sorry', 'Sorry, this item is currently unavailable'
                 ]
                 
                 # 检查页面内容是否包含有货关键词
                 in_stock_keywords = [
-                    'add to cart', 'buy now', '立即购买', '加入购物车',
+                    'add to bag', 'buy now', '立即购买', '加入购物车',
                     'in stock', '有货', '现货', 'available', 'order now',
                     'purchase', 'checkout', '订购', '下单', '继续', '繼續',
                     'configure', 'select options', 'stock: 1', 'stock: 2',
